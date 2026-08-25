@@ -5,6 +5,8 @@
 > **适配版本：Streamlink 8.x**
 > 更新日期：2026-08-25
 
+最先发布在：[telegraph](https://telegra.ph/%E5%8F%AF%E5%BD%95%E5%88%B6stripchat%E7%9A%84streamlink%E6%8F%92%E4%BB%B6-11-25)
+
 ## ✨ Features
 
 * 支持 Stripchat 直播间 URL
