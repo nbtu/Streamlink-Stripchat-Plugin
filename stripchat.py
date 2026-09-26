@@ -1,5 +1,5 @@
 # 文件名：stripchat.py by https://t.me/stripol
-# 2026年8月25日更新 (适配 Streamlink 8 - 修正直链及全链路 pkey 白名单兜底)
+# 2026年9月27日更新 (适配 Streamlink 8 - base_url 改为列表，当首个域名遭遇 Cloudflare 验证（如 403/503 质询）、请求超时或报错时，自动重试下一个可用域名。)
 from __future__ import annotations
 import logging
 import re
@@ -177,7 +177,7 @@ class DecryptHLSStreamV2(HLSStream):
     __reader__ = DecryptHLSStreamReaderV2
 
 # ====================== 插件主体 ======================
-@pluginmatcher(re.compile(r"https?://(?:[\w-]+\.)?(?:stripchat\.com|stripol\.com)/([^/?#]+)", re.I))
+@pluginmatcher(re.compile(r"https?://(?:[\w-]+\.)?(?:stripchat\.com|stripol\.com|xlivesex\.com|stripchats\.io)/([^/?#]+)", re.I))
 @pluginmatcher(re.compile(r"https?://[^\?]*\.doppiocdn\.(?:com|org|live|net|media)/.*\.m3u8", re.I))
 class Stripchat(Plugin):
     def _sanitize_url_pkey(self, url: str) -> str:
@@ -195,7 +195,6 @@ class Stripchat(Plugin):
         if "doppiocdn" in self.url:
             log.info("[plugin] 正在检测直链加密版本...")
             
-            # 清理 URL 中未知的 pkey 参数
             target_url = self._sanitize_url_pkey(self.url)
 
             text = self.session.http.get(target_url).text
@@ -219,69 +218,85 @@ class Stripchat(Plugin):
         # 2. 直播间模式
         username = self.match.group(1)
         log.info(f"[plugin] 正在查询主播: {username}")
-        base_url="https://zh.stripchat.com"
+
+        # 备选域名列表，域名1优先，失败自动切换下一个
+        base_urls = [
+            "https://zh.xlivesex.com",
+            "https://zh.stripchats.io",
+            "https://zh.stripol.com",
+            "https://zh.stripchat.com"
+        ]
+
         headers = {
             "Referer": self.url,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "x-device-info": '{"t":"webMobile","v":"1.0","ui":24631221}'
         }
-        uniq = ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
-        # 先通过用户名获取 ID
-        user_id_response = self.session.http.get(f"{base_url}/api/front/users/user-ids/{username}?{uniq}", headers=headers, timeout=15)
-        if user_id_response.status_code != 200:
-            logger.error(f"获取主播ID失败: {anchor_name} 响应码 {user_id_response.status_code}")
-            return {"status": "error", "msg": f"获取主播ID失败 HTTP {user_id_response.status_code}"}
-    
-        user_id_data = user_id_response.json()
-        model_id = user_id_data.get("id")
-        if not model_id:
-            logger.error(f"未获取到主播ID: {anchor_name}, 响应: {user_id_data}")
-            return {"status": "error", "msg": f"未获取到主播ID: {anchor_name}"}
-    
-        # 使用 ID 获取主播信息
-        
-        api = f"{base_url}/api/front/v2/models/{model_id}/cam?timezoneOffset=0&triggerRequest=loadCam&uniq={uniq}"
-        
-        #api = f"{base_url}/api/front/v2/models/username/{username}/cam"
-        
-        try:
-            res = self.session.http.get(api, headers=headers, timeout=15)
-            data = res.json()
-            cam = data.get("cam", {})
-            user_data = data.get("user", {})
-            uid = user_data.get("user", {}).get("id") or user_data.get("id")
-            
-            if not uid or cam.get("show") or not cam.get("isCamAvailable", False):
-                log.info(f"主播 {username} 当前不在线或不可观测")
-                return {}
 
-            log.info(f"[plugin] 主播在线 (UID: {uid})，准备探测变体流...")
-            
-            auto = f"https://edge-hls.doppiocdn.com/hls/{uid}/master/{uid}_auto.m3u8"
-            text = self.session.http.get(auto).text
-            
-            m = re.search(r"#EXT-X-MOUFLON:PSCH:v2:([^\s]+)", text)
-            pkey = m.group(1) if m else DEFAULT_PKEY
-            
-            if pkey not in KEY_MAP:
-                log.warning(f"[plugin] 探测到未知的 pkey: {pkey}, 已强制兜底切换至: {FALLBACK_PKEY_V2}")
-                pkey = FALLBACK_PKEY_V2
-            
-            master = f"{auto}?psch=v2&pkey={pkey}&_HLS_msn=1&_HLS_part=0"
-            streams = HLSStream.parse_variant_playlist(self.session, master)
-            
-            final = {}
-            for name, s in streams.items():
-                txt = self.session.http.get(s.url).text
-                if "#EXT-X-MOUFLON:URI:" in txt:
-                    log.info(f"[plugin] 码率 {name} 匹配为 v2 解密")
-                    final[name] = DecryptHLSStreamV2(self.session, s.url)
+        model_id = None
+        
+        # 依次遍历 API 域名进行重试（应对 CF 质询/屏蔽）
+        for base_url in base_urls:
+            uniq = ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
+            try:
+                log.info(f"[plugin] 尝试使用节点获取主播ID: {base_url}")
+                user_id_url = f"{base_url}/api/front/users/user-ids/{username}?{uniq}"
+                user_id_response = self.session.http.get(user_id_url, headers=headers, timeout=10)
+                
+                if user_id_response.status_code == 200:
+                    user_id_data = user_id_response.json()
+                    model_id = user_id_data.get("id")
+                    if model_id:
+                        log.info(f"[plugin] 成功获取主播ID ({model_id}) via {base_url}")
+                        
+                        # 请求主播 Cam 信息
+                        api = f"{base_url}/api/front/v2/models/{model_id}/cam?timezoneOffset=0&triggerRequest=loadCam&uniq={uniq}"
+                        res = self.session.http.get(api, headers=headers, timeout=10)
+                        
+                        if res.status_code == 200:
+                            data = res.json()
+                            cam = data.get("cam", {})
+                            user_data = data.get("user", {})
+                            uid = user_data.get("user", {}).get("id") or user_data.get("id")
+                            
+                            if not uid or cam.get("show") or not cam.get("isCamAvailable", False):
+                                log.info(f"[plugin] 主播 {username} 当前不在线或不可观测")
+                                return {}
+
+                            log.info(f"[plugin] 主播在线 (UID: {uid})，准备探测变体流...")
+                            
+                            auto = f"https://edge-hls.doppiocdn.com/hls/{uid}/master/{uid}_auto.m3u8"
+                            text = self.session.http.get(auto).text
+                            
+                            m = re.search(r"#EXT-X-MOUFLON:PSCH:v2:([^\s]+)", text)
+                            pkey = m.group(1) if m else DEFAULT_PKEY
+                            
+                            if pkey not in KEY_MAP:
+                                log.warning(f"[plugin] 探测到未知的 pkey: {pkey}, 已强制兜底切换至: {FALLBACK_PKEY_V2}")
+                                pkey = FALLBACK_PKEY_V2
+                            
+                            master = f"{auto}?psch=v2&pkey={pkey}&_HLS_msn=1&_HLS_part=0"
+                            streams = HLSStream.parse_variant_playlist(self.session, master)
+                            
+                            final = {}
+                            for name, s in streams.items():
+                                txt = self.session.http.get(s.url).text
+                                if "#EXT-X-MOUFLON:URI:" in txt:
+                                    log.info(f"[plugin] 码率 {name} 匹配为 v2 解密")
+                                    final[name] = DecryptHLSStreamV2(self.session, s.url)
+                                else:
+                                    log.info(f"[plugin] 码率 {name} 匹配为 v1 解密")
+                                    final[name] = DecryptHLSStream(self.session, s.url)
+                            return final
+                        else:
+                            log.warning(f"[plugin] 节点 {base_url} Cam 接口响应异常 HTTP {res.status_code}")
                 else:
-                    log.info(f"[plugin] 码率 {name} 匹配为 v1 解密")
-                    final[name] = DecryptHLSStream(self.session, s.url)
-            return final
+                    log.warning(f"[plugin] 节点 {base_url} 获取 ID 失败, HTTP状态码: {user_id_response.status_code}")
+            except Exception as e:
+                log.warning(f"[plugin] 节点 {base_url} 请求超时或出现异常: {e}")
             
-        except Exception as e:
-            log.error(f"[plugin] 解析过程异常: {e}")
+            log.info(f"[plugin] 正在切换至下一个域名节点...")
 
+        log.error(f"[plugin] 所有 API 镜像节点均获取失败或被 CF 阻断")
+        return {}
 __plugin__ = Stripchat
