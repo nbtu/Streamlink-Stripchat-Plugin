@@ -2,8 +2,10 @@
 
 一个用于 [Streamlink](https://streamlink.github.io/) 的 Stripchat 播放插件，支持解析 Stripchat 直播间以及 DoppioCDN HLS 直链，并针对 Mouflon v1/v2 播放列表进行处理。
 
-> **适配版本：Streamlink 8.x**
-> 更新日期：2026-08-25
+> **适配版本：Streamlink 8.x**  
+> 2026年8月25日更新 (适配 Streamlink 8 - 修正直链及全链路 pkey 白名单兜底)  
+> 2026年9月27日更新 (适配 Streamlink 8 - base_url 改为列表，当首个域名遭遇 Cloudflare 验证（如 403/503 质询）、请求超时或报错时，自动重试下一个可用域名。)  
+
 
 最先发布在：[telegraph](https://telegra.ph/%E5%8F%AF%E5%BD%95%E5%88%B6stripchat%E7%9A%84streamlink%E6%8F%92%E4%BB%B6-11-25)
 
